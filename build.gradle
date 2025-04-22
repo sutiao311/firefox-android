@@ -1,632 +1,1002 @@
-buildDir "${topobjdir}/gradle/build/mobile/android/geckoview"
+import com.android.build.api.variant.FilterConfiguration
+import org.apache.tools.ant.util.StringUtils
+
+buildscript {
+    repositories {
+        gradle.mozconfig.substs.GRADLE_MAVEN_REPOSITORIES.each { repository ->
+            maven {
+                url repository
+                if (gradle.mozconfig.substs.ALLOW_INSECURE_GRADLE_REPOSITORIES) {
+                    allowInsecureProtocol = true
+                }
+            }
+        }
+    }
+
+    dependencies {
+        classpath ComponentsDependencies.plugin_serialization
+    }
+}
+
+plugins {
+    id "com.jetbrains.python.envs" version "$python_envs_plugin"
+    id "com.google.protobuf" version "$protobuf_plugin"
+}
+
+if (findProject(":geckoview") != null) {
+    buildDir "${topobjdir}/gradle/build/mobile/android/fenix"
+}
+
+apply plugin: 'com.android.application'
+apply plugin: 'kotlin-android'
+apply plugin: 'kotlin-parcelize'
+apply plugin: 'jacoco'
+apply plugin: 'androidx.navigation.safeargs.kotlin'
+apply plugin: 'com.google.android.gms.oss-licenses-plugin'
+apply plugin: 'kotlinx-serialization'
 
 import groovy.json.JsonOutput
+import org.gradle.internal.logging.text.StyledTextOutput.Style
+import org.gradle.internal.logging.text.StyledTextOutputFactory
+import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 
-apply plugin: 'com.android.library'
-apply plugin: 'checkstyle'
-apply plugin: 'kotlin-android'
+import static org.gradle.api.tasks.testing.TestResult.ResultType
 
-// The SDK binding generation tasks depend on the JAR creation task of the
-// :annotations project.
-evaluationDependsOn(':annotations')
+apply from: 'benchmark.gradle'
 
 android {
-    buildToolsVersion project.ext.buildToolsVersion
-    compileSdkVersion project.ext.compileSdkVersion
+    project.maybeConfigForJetpackBenchmark(it)
+    if (project.hasProperty("testBuildType")) {
+        // Allowing to configure the test build type via command line flag (./gradlew -PtestBuildType=beta ..)
+        // in order to run UI tests against other build variants than debug in automation.
+        testBuildType project.property("testBuildType")
+    }
 
-    useLibrary 'android.test.runner'
-    useLibrary 'android.test.base'
-    useLibrary 'android.test.mock'
+    defaultConfig {
+        //by sutiao
+        // ⚠️ 告诉 Gradle，当某个依赖没有 product flavor 时，我可以接受 defaultFlavor
+        missingDimensionStrategy 'product', 'defaultFlavor'
+        //by sutiao
+
+        applicationId "org.mozilla"
+        minSdkVersion config.minSdkVersion
+        compileSdk config.compileSdkVersion
+        targetSdkVersion config.targetSdkVersion
+        versionCode 1
+        versionName Config.generateDebugVersionName()
+        vectorDrawables.useSupportLibrary = true
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        testInstrumentationRunnerArguments clearPackageData: 'true'
+        testInstrumentationRunnerArguments "detect-leaks": 'true'
+        resValue "bool", "IS_DEBUG", "false"
+        buildConfigField "boolean", "USE_RELEASE_VERSIONING", "false"
+        buildConfigField "String", "VCS_HASH", "\"\"" // see override in release builds for why it's blank.
+        // This should be the "public" base URL of AMO.
+        buildConfigField "String", "AMO_BASE_URL", "\"https://addons.mozilla.org\""
+        buildConfigField "String", "AMO_COLLECTION_NAME", "\"Extensions-for-Android\""
+        buildConfigField "String", "AMO_COLLECTION_USER", "\"mozilla\""
+        // These add-ons should be excluded for Mozilla Online builds.
+        buildConfigField "String[]", "MOZILLA_ONLINE_ADDON_EXCLUSIONS",
+                "{" +
+                        "\"uBlock0@raymondhill.net\"," +
+                        "\"firefox@ghostery.com\"," +
+                        "\"jid1-MnnxcxisBPnSXQ@jetpack\"," +
+                        "\"adguardadblocker@adguard.com\"," +
+                        "\"foxyproxy@eric.h.jung\"," +
+                        "\"{73a6fe31-595d-460b-a920-fcc0f8843232}\"," +
+                        "\"jid1-BoFifL9Vbdl2zQ@jetpack\"," +
+                        "\"woop-NoopscooPsnSXQ@jetpack\"," +
+                        "\"adnauseam@rednoise.org\"" +
+                "}"
+        // This should be the base URL used to call the AMO API.
+        buildConfigField "String", "AMO_SERVER_URL", "\"https://services.addons.mozilla.org\""
+
+        def deepLinkSchemeValue = "fenix-dev"
+        buildConfigField "String", "DEEP_LINK_SCHEME", "\"$deepLinkSchemeValue\""
+
+        // This allows overriding the target activity for MozillaOnline builds, which happens
+        // as part of the defaultConfig below.
+        def targetActivity = "HomeActivity"
+
+        // Build flag for "Mozilla Online" variants. See `Config.isMozillaOnline`.
+        if (project.hasProperty("mozillaOnline") || gradle.hasProperty("localProperties.mozillaOnline")) {
+            buildConfigField "boolean", "MOZILLA_ONLINE", "true"
+            targetActivity = "MozillaOnlineHomeActivity"
+        } else {
+            buildConfigField "boolean", "MOZILLA_ONLINE", "false"
+        }
+
+        manifestPlaceholders = [
+                "targetActivity": targetActivity,
+                "deepLinkScheme": deepLinkSchemeValue
+        ]
+
+        buildConfigField "String[]", "SUPPORTED_LOCALE_ARRAY", getSupportedLocales()
+    }
 
     //by sutiao
-    flavorDimensions += "product"
-    productFlavors {
-        defaultFlavor {
-            dimension "product"
+    signingConfigs {
+        debug {
+            storeFile file('release.jks')
+            storePassword 'zixun2020'
+            keyPassword 'zixun2020'
+            keyAlias = 'superbrowser'
+
+//            storeFile file('debug.jks')
+//            storePassword '123456'
+//            keyPassword '123456'
+//            keyAlias = 'key'
+        }
+        /*release {
+            storeFile file('release.jks')
+            storePassword 'zixun2020'
+            keyPassword 'zixun2020'
+            keyAlias = 'superbrowser'
+	        v1SigningEnabled true
+            v2SigningEnabled true
+        }*/
+        release {
+            
+                /*storeFile file(System.getenv('release.jks'))
+                storePassword System.getenv('zixun2020')
+                keyAlias System.getenv('superbrowser')
+                keyPassword System.getenv('zixun2020')*/
+                storeFile file('release.jks')
+                storePassword 'zixun2020'
+                keyPassword 'zixun2020'
+                keyAlias = 'superbrowser'
+                v1SigningEnabled true
+                v2SigningEnabled true
+        }
+    }
+    //by sutiao
+
+    def releaseTemplate = {
+        // We allow disabling optimization by passing `-PdisableOptimization` to gradle. This is used
+        // in automation for UI testing non-debug builds.
+        //shrinkResources !project.hasProperty("disableOptimization")
+        //by sutiao
+        //minifyEnabled !project.hasProperty("disableOptimization")
+        //minifyEnabled false
+        //testBuildType "release"
+        
+        //by sutiao
+            minifyEnabled true
+            testBuildType "release"
+            shrinkResources true
+            //by sutiao
+
+        proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        matchingFallbacks = ['defaultFlavorRelease'] // Use on the "release" build type in dependencies (AARs)
+
+        // Changing the build config can cause files that depend on BuildConfig.java to recompile
+        // so we only set the vcs hash in release builds to avoid possible recompilation in debug builds.
+        if (gradle.ext.vcsHashFileContent) {
+            buildConfigField "String", "VCS_HASH", "\"hg-${gradle.ext.vcsHashFileContent}\""
+        } else {
+            buildConfigField "String", "VCS_HASH", "\"${Config.vcsHash}\""
+        }
+
+        if (gradle.hasProperty("localProperties.autosignReleaseWithDebugKey")) {
+            signingConfig signingConfigs.debug
+        } else {
+            signingConfig signingConfigs.release
+        }
+
+        if (gradle.hasProperty("localProperties.debuggable")) {
+            debuggable true
+        } else {
+            debuggable false
         }
     }
 
     buildTypes {
-        release {
+        debug {
+            shrinkResources false
             minifyEnabled false
-            testBuildType "release"  // 关键配置
-            // 隔离生成路径配置
-            javaCompileOptions.annotationProcessorOptions.arguments = [
-                "room.schemaLocation": "$projectDir/schemas/release".toString()
-            ]
-
-            // AIDL路径配置
-            sourceSets.release.aidl.srcDirs = ["src/release/aidl"]
+            applicationIdSuffix ".fenix.debug"
+            resValue "bool", "IS_DEBUG", "true"
+            pseudoLocalesEnabled true
         }
-    }
+        nightly releaseTemplate >> {
+            applicationIdSuffix ".fenix"
+            buildConfigField "boolean", "USE_RELEASE_VERSIONING", "true"
+            def deepLinkSchemeValue = "fenix-nightly"
+            buildConfigField "String", "DEEP_LINK_SCHEME", "\"$deepLinkSchemeValue\""
+            manifestPlaceholders.putAll([
+                    "deepLinkScheme": deepLinkSchemeValue
+            ])
+        }
+        beta releaseTemplate >> {
+            buildConfigField "boolean", "USE_RELEASE_VERSIONING", "true"
+            applicationIdSuffix ".firefox_beta"
+            def deepLinkSchemeValue = "fenix-beta"
+            buildConfigField "String", "DEEP_LINK_SCHEME", "\"$deepLinkSchemeValue\""
+            manifestPlaceholders.putAll([
+                    // This release type is meant to replace Firefox (Beta channel) and therefore needs to inherit
+                    // its sharedUserId for all eternity. See:
+                    // https://searchfox.org/mozilla-esr68/search?q=moz_android_shared_id&case=false&regexp=false&path=
+                    // Shipping an app update without sharedUserId can have
+                    // fatal consequences. For example see:
+                    //  - https://issuetracker.google.com/issues/36924841
+                    //  - https://issuetracker.google.com/issues/36905922
+                    "sharedUserId": "org.mozilla.firefox.sharedID",
+                    "deepLinkScheme": deepLinkSchemeValue,
+            ])
+        }
+        release releaseTemplate >> {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
+            testBuildType "release"
 
-    //by sutiao
-    
-    defaultConfig {
-        //by sutiao
-        missingDimensionStrategy 'product', 'defaultFlavor'
-        //by sutiao
-        targetSdkVersion project.ext.targetSdkVersion
-        minSdkVersion project.ext.minSdkVersion
-        manifestPlaceholders = project.ext.manifestPlaceholders
-
-        versionCode project.ext.versionCode
-        versionName project.ext.versionName
-        consumerProguardFiles 'proguard-rules.txt'
-
-        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
-
-        buildConfigField 'String', "GRE_MILESTONE", "\"${mozconfig.substs.GRE_MILESTONE}\""
-        buildConfigField 'String', "MOZ_APP_BASENAME", "\"${mozconfig.substs.MOZ_APP_BASENAME}\"";
-
-        // For the benefit of future archaeologists:
-        // GRE_BUILDID is exactly the same as MOZ_APP_BUILDID unless you're running
-        // on XULRunner, which is never the case on Android.
-        buildConfigField 'String', "MOZ_APP_BUILDID", "\"${project.ext.buildId}\"";
-        buildConfigField 'String', "MOZ_APP_ID", "\"${mozconfig.substs.MOZ_APP_ID}\"";
-        buildConfigField 'String', "MOZ_APP_NAME", "\"${mozconfig.substs.MOZ_APP_NAME}\"";
-        buildConfigField 'String', "MOZ_APP_VENDOR", "\"${mozconfig.substs.MOZ_APP_VENDOR}\"";
-        buildConfigField 'String', "MOZ_APP_VERSION", "\"${mozconfig.substs.MOZ_APP_VERSION}\"";
-        buildConfigField 'String', "MOZ_APP_DISPLAYNAME", "\"${mozconfig.substs.MOZ_APP_DISPLAYNAME}\"";
-        buildConfigField 'String', "MOZ_APP_UA_NAME", "\"${mozconfig.substs.MOZ_APP_UA_NAME}\"";
-        buildConfigField 'String', "MOZ_UPDATE_CHANNEL", "\"${mozconfig.substs.MOZ_UPDATE_CHANNEL}\"";
-
-        // MOZILLA_VERSION is oddly quoted from autoconf, but we don't have to handle it specially in Gradle.
-        buildConfigField 'String', "MOZILLA_VERSION", "\"${mozconfig.substs.MOZILLA_VERSION}\"";
-        buildConfigField 'String', "OMNIJAR_NAME", "\"${mozconfig.substs.OMNIJAR_NAME}\"";
-
-        // Keep in sync with actual user agent in nsHttpHandler::BuildUserAgent
-        buildConfigField 'String', "USER_AGENT_GECKOVIEW_MOBILE", "\"Mozilla/5.0 (Android \" + android.os.Build.VERSION.RELEASE + \"; Mobile; rv:\" + ${mozconfig.defines.MOZILLA_UAVERSION} + \") Gecko/\" + ${mozconfig.defines.MOZILLA_UAVERSION} + \" Firefox/\" + ${mozconfig.defines.MOZILLA_UAVERSION}";
-        buildConfigField 'String', "USER_AGENT_GECKOVIEW_MOBILE_ANDROID_10", "\"Mozilla/5.0 (Android 10; Mobile; rv:\" + ${mozconfig.defines.MOZILLA_UAVERSION} + \") Gecko/\" + ${mozconfig.defines.MOZILLA_UAVERSION} + \" Firefox/\" + ${mozconfig.defines.MOZILLA_UAVERSION}";
-
-        buildConfigField 'int', 'MIN_SDK_VERSION', mozconfig.substs.MOZ_ANDROID_MIN_SDK_VERSION;
-
-        // Is the underlying compiled C/C++ code compiled with --enable-debug?
-        buildConfigField 'boolean', 'DEBUG_BUILD', mozconfig.substs.MOZ_DEBUG ? 'true' : 'false';
-
-        // See this wiki page for more details about channel specific build defines:
-        // https://wiki.mozilla.org/Platform/Channel-specific_build_defines
-        // This makes no sense for GeckoView and should be removed as soon as possible.
-        buildConfigField 'boolean', 'RELEASE_OR_BETA', mozconfig.substs.RELEASE_OR_BETA ? 'true' : 'false';
-        // This makes no sense for GeckoView and should be removed as soon as possible.
-        buildConfigField 'boolean', 'NIGHTLY_BUILD', mozconfig.substs.NIGHTLY_BUILD ? 'true' : 'false';
-        // This makes no sense for GeckoView and should be removed as soon as possible.
-        buildConfigField 'boolean', 'MOZ_CRASHREPORTER', mozconfig.substs.MOZ_CRASHREPORTER ? 'true' : 'false';
-
-        buildConfigField 'int', 'MOZ_ANDROID_CONTENT_SERVICE_COUNT', mozconfig.substs.MOZ_ANDROID_CONTENT_SERVICE_COUNT;
-
-        // Official corresponds, roughly, to whether this build is performed on
-        // Mozilla's continuous integration infrastructure. You should disable
-        // developer-only functionality when this flag is set.
-        // This makes no sense for GeckoView and should be removed as soon as possible.
-        buildConfigField 'boolean', 'MOZILLA_OFFICIAL', mozconfig.substs.MOZILLA_OFFICIAL ? 'true' : 'false';
-
-        // This env variable signifies whether we are running an isolated process build.
-        buildConfigField 'boolean', 'MOZ_ANDROID_CONTENT_SERVICE_ISOLATED_PROCESS', mozconfig.substs.MOZ_ANDROID_CONTENT_SERVICE_ISOLATED_PROCESS ? 'true' : 'false';
-    }
-
-    lintOptions {
-        abortOnError false
-    }
-
-    sourceSets {
-        main {
-            java {
-                if (!mozconfig.substs.MOZ_ANDROID_HLS_SUPPORT) {
-                    exclude 'org/mozilla/gecko/media/GeckoHlsAudioRenderer.java'
-                    exclude 'org/mozilla/gecko/media/GeckoHlsPlayer.java'
-                    exclude 'org/mozilla/gecko/media/GeckoHlsRendererBase.java'
-                    exclude 'org/mozilla/gecko/media/GeckoHlsVideoRenderer.java'
-                    exclude 'org/mozilla/gecko/media/Utils.java'
-                }
-
-                if (mozconfig.substs.MOZ_WEBRTC) {
-                    srcDir "${topsrcdir}/dom/media/systemservices/android_video_capture/java/src"
-                    srcDir "${topsrcdir}/third_party/libwebrtc/sdk/android/api"
-                    srcDir "${topsrcdir}/third_party/libwebrtc/sdk/android/src"
-                    srcDir "${topsrcdir}/third_party/libwebrtc/rtc_base/java"
-                }
-
-                srcDir "${topobjdir}/mobile/android/geckoview/src/main/java"
-            }
-
-            resources {
-                if (mozconfig.substs.MOZ_ASAN) {
-                    // If this is an ASAN build, include a `wrap.sh` for Android 8.1+ devices.  See
-                    // https://developer.android.com/ndk/guides/wrap-script.
-                    srcDir "${topsrcdir}/mobile/android/geckoview/src/asan/resources"
-                }
-            }
-
-            assets {
-                // This should contain only `omni.ja`.
-                srcDir "${topobjdir}/dist/geckoview/assets"
-            }
-
-            jniLibs {
-                if (!mozconfig.substs.MOZ_ANDROID_FAT_AAR_ARCHITECTURES) {
-                    srcDir "${topobjdir}/dist/geckoview/lib"
-                } else {
-                    srcDir "${topobjdir}/dist/fat-aar/output/jni"
-                }
-            }
-
-            debug {
-                manifest.srcFile "${topobjdir}/mobile/android/geckoview/src/main/AndroidManifest_overlay.xml"
-            }
-
-            release {
-                manifest.srcFile "${topobjdir}/mobile/android/geckoview/src/main/AndroidManifest_overlay.xml"
-            }
+            buildConfigField "boolean", "USE_RELEASE_VERSIONING", "true"
+            applicationIdSuffix ".firefox"
+            def deepLinkSchemeValue = "fenix"
+            buildConfigField "String", "DEEP_LINK_SCHEME", "\"$deepLinkSchemeValue\""
+            manifestPlaceholders.putAll([
+                    // This release type is meant to replace Firefox (Release channel) and therefore needs to inherit
+                    // its sharedUserId for all eternity. See:
+                    // https://searchfox.org/mozilla-esr68/search?q=moz_android_shared_id&case=false&regexp=false&path=
+                    // Shipping an app update without sharedUserId can have
+                    // fatal consequences. For example see:
+                    //  - https://issuetracker.google.com/issues/36924841
+                    //  - https://issuetracker.google.com/issues/36905922
+                    "sharedUserId": "org.mozilla.firefox.sharedID",
+                    "deepLinkScheme": deepLinkSchemeValue,
+            ])
+        }
+        benchmark releaseTemplate >> {
+            initWith buildTypes.nightly
+            applicationIdSuffix ".fenix"
+            signingConfig signingConfigs.debug
+            debuggable false
         }
     }
 
     buildFeatures {
+        viewBinding true
         buildConfig true
-        aidl = true
     }
 
-    /*publishing {
-        // by sutiao
-        //singleVariant('debug')
-        singleVariant('defaultFlavorRelease') {
-            withSourcesJar()   // 可选：包含源码
-            withJavadocJar()  // 可选：包含文档
-            withArtifacts()
+    androidResources {
+        // All JavaScript code used internally by GeckoView is packaged in a
+        // file called omni.ja. If this file is compressed in the APK,
+        // GeckoView must uncompress it before it can do anything else which
+        // causes a significant delay on startup.
+        noCompress 'ja'
+
+        // manifest.template.json is converted to manifest.json at build time.
+        // No need to package the template in the APK.
+        ignoreAssetsPattern "manifest.template.json"
+    }
+
+    testOptions {
+        execution 'ANDROIDX_TEST_ORCHESTRATOR'
+        unitTests.includeAndroidResources = true
+        animationsDisabled = true
+    }
+
+    flavorDimensions.add("product")
+
+    productFlavors {
+        fenix {
+            dimension "product"
+            matchingFallbacks = ["defaultFlavor"]
         }
-        publications {
-            release(MavenPublication) {
-                afterEvaluate {
-                    from components.defaultFlavorRelease
-                }
-            }
+
+    }
+
+    sourceSets {
+        androidTest {
+            resources.srcDirs += ['src/androidTest/resources']
         }
-        // by sutiao
-    }*/
-    afterEvaluate {
-        publishing {
-            publications {
-                release(MavenPublication) {
-                    from components.defaultFlavorRelease
-                }
+        if (project.hasProperty('baselineProfilePath')) {
+            main {
+                baselineProfiles.srcDirs(project.property('baselineProfilePath'))
             }
         }
     }
 
-    namespace 'org.mozilla.geckoview'
+    splits {
+        abi {
+            enable true
+
+            reset()
+
+            // As gradle is unable to pick the right apk to install when multiple apks are generated
+            // while running benchmark tests or generating baseline profiles. To circumvent this,
+            // this flag is passed to make sure only one apk is generated so gradle can pick that one.
+            if (project.hasProperty("benchmarkTest")) {
+                include "arm64-v8a"
+            } else {
+                include "x86", "armeabi-v7a", "arm64-v8a", "x86_64"
+            }
+        }
+    }
+
+    bundle {
+        // Profiler issues require us to temporarily package native code compressed to
+        // match the previous APK packaging.
+        // https://bugzilla.mozilla.org/show_bug.cgi?id=1865634
+        packagingOptions {
+            jniLibs {
+                it.useLegacyPackaging = true
+            }
+        }
+
+        language {
+            // Because we have runtime language selection we will keep all strings and languages
+            // in the base APKs.
+            enableSplit = false
+        }
+    }
+
+    lint {
+        lintConfig file("lint.xml")
+        baseline file("lint-baseline.xml")
+    }
+    packagingOptions {
+        resources {
+            excludes += ['MANIFEST.MF', 'META-INF/atomicfu.kotlin_module', 'META-INF/AL2.0',
+                         'META-INF/LGPL2.1', 'META-INF/LICENSE.md', 'META-INF/LICENSE-notice.md']
+        }
+        jniLibs {
+            useLegacyPackaging true
+        }
+    }
+
+
+    testOptions {
+        unitTests.returnDefaultValues = true
+
+        unitTests.all {
+            // We keep running into memory issues when running our tests. With this config we
+            // reserve more memory and also create a new process after every 80 test classes. This
+            // is a band-aid solution and eventually we should try to find and fix the leaks
+            // instead. :)
+            forkEvery = 80
+            maxHeapSize = "3072m"
+            minHeapSize = "1024m"
+        }
+    }
+
+    buildFeatures {
+        compose true
+    }
+
+    composeOptions {
+        kotlinCompilerExtensionVersion = Versions.compose_compiler
+    }
+
+    namespace 'org.mozilla.fenix'
 }
 
-tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile) {
-    // Translate Kotlin messages like "w: ..." and "e: ..." into
-    // "...: warning: ..." and "...: error: ...", to make Treeherder understand.
-    def listener = {
-        if (it.startsWith("e: warnings found")) {
-            return
-        }
+android.applicationVariants.configureEach { variant ->
 
-        if (it.startsWith('w: ') || it.startsWith('e: ')) {
-            def matches = (it =~ /([ew]): (.+): \((\d+), (\d+)\): (.*)/)
-            if (!matches) {
-                logger.quiet "kotlinc message format has changed!"
-                if (it.startsWith('w: ')) {
-                    // For warnings, don't continue because we don't want to throw an
-                    // exception. For errors, we want the exception so that the new error
-                    // message format gets translated properly.
-                    return
-                }
+// -------------------------------------------------------------------------------------------------
+// Generate version codes for builds
+// -------------------------------------------------------------------------------------------------
+
+    def isDebug = variant.buildType.resValues['bool/IS_DEBUG']?.value ?: false
+    def useReleaseVersioning = variant.buildType.buildConfigFields['USE_RELEASE_VERSIONING']?.value ?: false
+
+    project.logger.debug("----------------------------------------------")
+    project.logger.debug("Variant name:      " + variant.name)
+    project.logger.debug("Application ID:    " + [variant.applicationId, variant.buildType.applicationIdSuffix].findAll().join())
+    project.logger.debug("Build type:        " + variant.buildType.name)
+    project.logger.debug("Flavor:            " + variant.flavorName)
+    project.logger.debug("Telemetry enabled: " + !isDebug)
+
+    if (useReleaseVersioning) {
+        // The Google Play Store does not allow multiple APKs for the same app that all have the
+        // same version code. Therefore we need to have different version codes for our ARM and x86
+        // builds.
+
+        def versionName = variant.buildType.name == 'nightly' ?
+                "${Config.nightlyVersionName(project)}" :
+                "${Config.releaseVersionName(project)}"
+        project.logger.debug("versionName override: $versionName")
+
+        variant.outputs.each { output ->
+            def isMozillaOnline = project.hasProperty("mozillaOnline") || gradle.hasProperty("localProperties.mozillaOnline")
+            def abi = output.getFilter(FilterConfiguration.FilterType.ABI.name())
+            // If it is a Mozilla Online build, use a unified version code of armeabi-v7a
+            def arch = (isMozillaOnline) ? "armeabi-v7a" : abi
+            def aab = project.hasProperty("aab")
+            // We use the same version code generator, that we inherited from Fennec, across all channels - even on
+            // channels that never shipped a Fennec build.
+            def versionCodeOverride = Config.generateFennecVersionCode(arch, aab)
+
+            project.logger.debug("versionCode for $abi = $versionCodeOverride, isMozillaOnline = $isMozillaOnline")
+
+            if (versionName != null) {
+                output.versionNameOverride = versionName
             }
-            def (_, type, file, line, column, message) = matches[0]
-            type = (type == 'w') ? 'warning' : 'error'
-            // Use logger.lifecycle, which does not go through stderr again.
-            logger.lifecycle "$file:$line:$column: $type: $message"
+            output.versionCodeOverride = versionCodeOverride
         }
-    } as StandardOutputListener
-
-    kotlinOptions {
-        allWarningsAsErrors = true
+    } else if (gradle.hasProperty("localProperties.branchBuild.fenix.version")) {
+        def versionName = gradle.getProperty("localProperties.branchBuild.fenix.version")
+        project.logger.debug("versionName override: $versionName")
+        variant.outputs.each { output ->
+            output.versionNameOverride = versionName
+        }
     }
 
-    doFirst {
-        logging.addStandardErrorListener(listener)
+// -------------------------------------------------------------------------------------------------
+// BuildConfig: Set variables for Sentry, Crash Reporting, and Telemetry
+// -------------------------------------------------------------------------------------------------
+
+    buildConfigField 'String', 'SENTRY_TOKEN', 'null'
+    if (!isDebug) {
+        buildConfigField 'boolean', 'CRASH_REPORTING', 'true'
+        // Reading sentry token from local file (if it exists). In a release task on taskcluster it will be available.
+        try {
+            def token = new File("${rootDir}/.sentry_token").text.trim()
+            buildConfigField 'String', 'SENTRY_TOKEN', '"' + token + '"'
+        } catch (FileNotFoundException ignored) {}
+    } else {
+        buildConfigField 'boolean', 'CRASH_REPORTING', 'false'
     }
-    doLast {
-        logging.removeStandardErrorListener(listener)
+
+    if (!isDebug) {
+        buildConfigField 'boolean', 'TELEMETRY', 'true'
+    } else {
+        buildConfigField 'boolean', 'TELEMETRY', 'false'
+    }
+
+    def buildDate = Config.generateBuildDate()
+    // Setting buildDate with every build changes the generated BuildConfig, which slows down the
+    // build. Only do this for non-debug builds, to speed-up builds produced during local development.
+    if (isDebug) {
+        buildConfigField 'String', 'BUILD_DATE', '"debug build"'
+    } else {
+        buildConfigField 'String', 'BUILD_DATE', '"' + buildDate + '"'
+    }
+
+// -------------------------------------------------------------------------------------------------
+// Adjust: Read token from local file if it exists (Only release builds)
+// -------------------------------------------------------------------------------------------------
+
+    project.logger.debug("Adjust token: ")
+
+    if (!isDebug) {
+        try {
+            def token = new File("${rootDir}/.adjust_token").text.trim()
+            buildConfigField 'String', 'ADJUST_TOKEN', '"' + token + '"'
+            project.logger.debug("(Added from .adjust_token file)")
+        } catch (FileNotFoundException ignored) {
+            buildConfigField 'String', 'ADJUST_TOKEN', 'null'
+            project.logger.debug("X_X")
+        }
+    } else {
+        buildConfigField 'String', 'ADJUST_TOKEN', 'null'
+        project.logger.debug("--")
+    }
+
+// -------------------------------------------------------------------------------------------------
+// MLS: Read token from local file if it exists
+// -------------------------------------------------------------------------------------------------
+
+    project.logger.debug("MLS token: ")
+
+    try {
+        def token = new File("${rootDir}/.mls_token").text.trim()
+        buildConfigField 'String', 'MLS_TOKEN', '"' + token + '"'
+        project.logger.debug("(Added from .mls_token file)")
+    } catch (FileNotFoundException ignored) {
+        buildConfigField 'String', 'MLS_TOKEN', '""'
+        project.logger.debug("X_X")
+    }
+
+// -------------------------------------------------------------------------------------------------
+// Nimbus: Read endpoint from local.properties of a local file if it exists
+// -------------------------------------------------------------------------------------------------
+
+    project.logger.debug("Nimbus endpoint: ")
+
+    if (!isDebug) {
+        try {
+            def url = new File("${rootDir}/.nimbus").text.trim()
+            buildConfigField 'String', 'NIMBUS_ENDPOINT', '"' + url + '"'
+            project.logger.debug("(Added from .nimbus file)")
+        } catch (FileNotFoundException ignored) {
+            buildConfigField 'String', 'NIMBUS_ENDPOINT', 'null'
+            project.logger.debug("X_X")
+        }
+    } else if (gradle.hasProperty("localProperties.nimbus.remote-settings.url")) {
+        def url=gradle.getProperty("localProperties.nimbus.remote-settings.url")
+        buildConfigField 'String', 'NIMBUS_ENDPOINT', '"' + url + '"'
+        project.logger.debug("(Added from local.properties file)")
+    } else {
+        buildConfigField 'String', 'NIMBUS_ENDPOINT', 'null'
+        project.logger.debug("--")
+    }
+
+// -------------------------------------------------------------------------------------------------
+// Glean: Read custom server URL from local.properties of a local file if it exists
+// -------------------------------------------------------------------------------------------------
+
+    project.logger.debug("Glean custom server URL: ")
+
+    if (gradle.hasProperty("localProperties.glean.custom.server.url")) {
+        def url=gradle.getProperty("localProperties.glean.custom.server.url")
+        buildConfigField 'String', 'GLEAN_CUSTOM_URL', url
+        project.logger.debug("(Added from local.properties file)")
+    } else {
+        buildConfigField 'String', 'GLEAN_CUSTOM_URL', 'null'
+        project.logger.debug("--")
+    }
+
+// -------------------------------------------------------------------------------------------------
+// BuildConfig: Set flag for official builds; similar to MOZILLA_OFFICIAL in mozilla-central.
+// -------------------------------------------------------------------------------------------------
+
+    if (project.hasProperty("official") || gradle.hasProperty("localProperties.official")) {
+        buildConfigField 'Boolean', 'MOZILLA_OFFICIAL', 'true'
+    } else {
+        buildConfigField 'Boolean', 'MOZILLA_OFFICIAL', 'false'
+    }
+
+// -------------------------------------------------------------------------------------------------
+// BuildConfig: Set remote wallpaper URL using local file if it exists
+// -------------------------------------------------------------------------------------------------
+
+    project.logger.debug("Wallpaper URL: ")
+
+    try {
+        def token = new File("${rootDir}/.wallpaper_url").text.trim()
+        buildConfigField 'String', 'WALLPAPER_URL', '"' + token + '"'
+        project.logger.debug("(Added from .wallpaper_url file)")
+    } catch (FileNotFoundException ignored) {
+        buildConfigField 'String', 'WALLPAPER_URL', '""'
+        project.logger.debug("--")
+    }
+
+// -------------------------------------------------------------------------------------------------
+// BuildConfig: Set the Pocket consumer key from a local file if it exists
+// -------------------------------------------------------------------------------------------------
+
+    project.logger.debug("Pocket consumer key: ")
+
+    try {
+        def token = new File("${rootDir}/.pocket_consumer_key").text.trim()
+        buildConfigField 'String', 'POCKET_CONSUMER_KEY', '"' + token + '"'
+        project.logger.debug("(Added from .pocket_consumer_key file)")
+    } catch (FileNotFoundException ignored) {
+        buildConfigField 'String', 'POCKET_CONSUMER_KEY', '""'
+        project.logger.debug("--")
+    }
+
+// -------------------------------------------------------------------------------------------------
+// BuildConfig: Set flag to disable LeakCanary in debug (on CI builds)
+// -------------------------------------------------------------------------------------------------
+
+    if (isDebug) {
+        if (project.hasProperty("disableLeakCanary") || gradle.hasProperty("localProperties.disableLeakCanary")) {
+            buildConfigField "boolean", "LEAKCANARY", "false"
+            project.logger.debug("LeakCanary enabled in debug: false")
+        } else {
+            buildConfigField "boolean", "LEAKCANARY", "true"
+            project.logger.debug("LeakCanary enabled in debug: true")
+        }
+    } else {
+        buildConfigField "boolean", "LEAKCANARY", "false"
     }
 }
 
-configurations {
-    api {
-        outgoing {
-            if (!mozconfig.substs.MOZ_ANDROID_GECKOVIEW_LITE) {
-                // The omni build provides glean-native
-                capability("org.mozilla.telemetry:glean-native:${project.ext.gleanVersion}")
-            }
-            afterEvaluate {
-                // Implicit capability
-                capability("org.mozilla.geckoview:${getArtifactId()}:${project.ext.versionNumber}")
-            }
-        }
-    }
-    // TODO: This is a workaround for a bug that was fixed in Gradle 7.
-    // The variant resolver _should_ pick the RuntimeOnly configuration when building
-    // the tests as those define the implicit :geckoview capability but it doesn't,
-    // so we manually define it here.
-    runtimeOnly {
-        outgoing {
-            afterEvaluate {
-                // Implicit capability
-                capability("org.mozilla.geckoview:geckoview:${project.ext.versionNumber}")
-            }
-        }
-    }
+// Generate Kotlin code for the Fenix Glean metrics.
+ext {
+    // Enable expiration by major version.
+    gleanExpireByVersion = Config.majorVersion(project)
+    gleanNamespace = "mozilla.telemetry.glean"
+    gleanPythonEnvDir = gradle.mozconfig.substs.GRADLE_GLEAN_PARSER_VENV
 }
+apply plugin: "org.mozilla.telemetry.glean-gradle-plugin"
+apply plugin: "org.mozilla.appservices.nimbus-gradle-plugin"
+
+nimbus {
+    // The path to the Nimbus feature manifest file
+    manifestFile = "nimbus.fml.yaml"
+    // The fully qualified class name for the generated features.
+    // Map from the variant name to the channel as experimenter and nimbus understand it.
+    // If nimbus's channels were accurately set up well for this project, then this
+    // shouldn't be needed.
+    channels = [
+            fenixDebug: "developer",
+            fenixNightly: "nightly",
+            fenixBeta: "beta",
+            fenixRelease: "release",
+            fenixBenchmark: "developer",
+    ]
+    // This is generated by the FML and should be checked into git.
+    // It will be fetched by Experimenter (the Nimbus experiment website)
+    // and used to inform experiment configuration.
+    experimenterManifest = ".experimenter.yaml"
+    applicationServicesDir = gradle.hasProperty('localProperties.autoPublish.application-services.dir')
+            ? gradle.getProperty('localProperties.autoPublish.application-services.dir') : null
+}
+
+tasks.withType(KotlinCompile).configureEach {
+    kotlinOptions.freeCompilerArgs += "-opt-in=kotlinx.coroutines.ExperimentalCoroutinesApi"
+}
+
 
 dependencies {
-    implementation ComponentsDependencies.androidx_annotation
-    implementation ComponentsDependencies.androidx_collection
-    implementation ComponentsDependencies.androidx_core
-
-    implementation ComponentsDependencies.play_services_fido
-    implementation "org.yaml:snakeyaml:2.2"
-    implementation 'androidx.core:core:1.12.0'
-
-    implementation ComponentsDependencies.androidx_lifecycle_common
-    implementation ComponentsDependencies.androidx_lifecycle_process
-
-    if (mozconfig.substs.MOZ_ANDROID_HLS_SUPPORT) {
-        implementation project(":exoplayer2")
-    }
-
-    testImplementation ComponentsDependencies.junit_vintage
-    testImplementation ComponentsDependencies.testing_robolectric
-
-    androidTestImplementation ComponentsDependencies.testing_coroutines
-    androidTestImplementation ComponentsDependencies.androidx_test_runner
-    androidTestImplementation ComponentsDependencies.androidx_test_rules
-    androidTestImplementation ComponentsDependencies.androidx_test_junit
-    androidTestImplementation ComponentsDependencies.androidx_espresso_core
-
-    androidTestImplementation 'com.koushikdutta.async:androidasync:3.1.0'
-}
-
-apply from: "${topsrcdir}/mobile/android/gradle/with_gecko_binaries.gradle"
-
-android.libraryVariants.all { variant ->
-    configureVariantWithGeckoBinaries(variant)
-
-    // Javadoc and Sources JAR configuration cribbed from
-    // https://github.com/mapbox/mapbox-gl-native/blob/d169ea55c1cfa85cd8bf19f94c5f023569f71810/platform/android/MapboxGLAndroidSDK/build.gradle#L85
-    // informed by
-    // https://code.tutsplus.com/tutorials/creating-and-publishing-an-android-library--cms-24582,
-    // and amended from numerous Stackoverflow posts.
-    def name = variant.name
-    def javadoc = task "javadoc${name.capitalize()}"(type: Javadoc) {
-        failOnError = false
-        description = "Generate Javadoc for build variant $name"
-        destinationDir = new File(destinationDir, variant.baseName)
-
-        // The javadoc task will not re-run if the previous run is still up-to-date,
-        // this is a problem for the javadoc lint, which needs to read the output of the task
-        // to determine if there are warnings or errors. To force that we pass a -Pandroid-lint
-        // parameter to all lints that can be used here to force running the task every time.
-        outputs.upToDateWhen {
-            !project.hasProperty('android-lint')
-        }
-
-        doFirst {
-            classpath = files(variant.javaCompileProvider.get().classpath.files)
-        }
-
-        def results = []
-        def listener = {
-            if (!it.toLowerCase().contains("warning:") && !it.toLowerCase().contains("error:")) {
-              // Likely not an error or a warning
-              return
-            }
-            // Like '/abs/path/to/topsrcdir/mobile/android/geckoview/src/main/java/org/mozilla/geckoview/ContentBlocking.java:480: warning: no @return'
-            def matches = (it =~ /(.+):(\d+):.*(warning|error)(.*)/)
-            if (!matches) {
-                // could not parse, let's add it anyway since it's a warning or error
-                results << [path: "parsing-failed", lineno: 0, level: "error", message: it]
-                return
-            }
-            def (_, file, line, level, message) = matches[0]
-            results << [path: file, lineno: line, level: level, message: message]
-        } as StandardOutputListener
-
-        doFirst {
-            logging.addStandardErrorListener(listener)
-        }
-
-        doLast {
-            logging.removeStandardErrorListener(listener)
-
-            // We used to treat Javadoc warnings as errors here; now we rely on the
-            // `android-javadoc` linter to fail in the face of Javadoc warnings.
-            def resultsJson = JsonOutput.toJson(results)
-
-            file("$buildDir/reports").mkdirs()
-            file("$buildDir/reports/javadoc-results-${name}.json").write(resultsJson)
-        }
-
-        source = variant.sourceSets.collect({ it.java.srcDirs })
-        exclude '**/R.java', '**/BuildConfig.java'
-        include 'org/mozilla/geckoview/**.java'
-        options.addPathOption('sourcepath').setValue(
-             variant.sourceSets.collect({ it.java.srcDirs }).flatten() +
-             variant.generateBuildConfigProvider.get().sourceOutputDir.asFile.get() +
-             variant.aidlCompileProvider.get().sourceOutputDir.asFile.get()
-        )
-        options.addStringOption("Xmaxwarns", "1000")
-
-        classpath += files(android.getBootClasspath())
-        classpath += variant.javaCompileProvider.get().classpath
-
-        options.memberLevel = JavadocMemberLevel.PROTECTED
-        options.source = 11
-        options.links("https://developer.android.com/reference")
-
-        options.docTitle = "GeckoView ${mozconfig.substs.MOZ_APP_VERSION} API"
-        options.header = "GeckoView ${mozconfig.substs.MOZ_APP_VERSION} API"
-        options.noTimestamp = true
-        options.noQualifiers = ['java.lang']
-        options.tags = ['hide:a:']
-    }
-
-    def javadocJar = task("javadocJar${name.capitalize()}", type: Jar, dependsOn: javadoc) {
-        archiveClassifier = 'javadoc'
-        from javadoc.destinationDir
-    }
-
-    // This task is used by `mach android geckoview-docs`.
-    task("javadocCopyJar${name.capitalize()}", type: Copy) {
-        from(javadocJar.destinationDirectory) {
-            include 'geckoview-*-javadoc.jar'
-            rename { _ -> 'geckoview-javadoc.jar' }
-        }
-        into javadocJar.destinationDirectory
-        dependsOn javadocJar
-    }
-
-    def sourcesJar = task("sourcesJar${name.capitalize()}", type: Jar) {
-        archiveClassifier = 'sources'
-        description = "Generate Javadoc for build variant $name"
-        destinationDirectory =
-            file("${topobjdir}/mobile/android/geckoview/sources/${variant.baseName}")
-        from files(variant.sourceSets.collect({ it.java.srcDirs }).flatten())
-    }
-
-    task("checkstyle${name.capitalize()}", type: Checkstyle) {
-        classpath = variant.javaCompileProvider.get().classpath
-        // TODO: cleanup and include all sources
-        source = ['src/main/java/']
-        include '**/*.java'
-
-    }
-}
-
-checkstyle {
-    configDirectory = file(".")
-    configFile = file("checkstyle.xml")
-    toolVersion = "8.36.2"
-}
-
-android.libraryVariants.all { variant ->
+    //by sutiao
+    implementation project(":geckoview")
     
-    if (variant.name == mozconfig.substs.GRADLE_ANDROID_GECKOVIEW_VARIANT_NAME) {
-        
-        configureLibraryVariantWithJNIWrappers(variant, "Generated")
+    //by sutiao
+    implementation ComponentsDependencies.kotlin_json
+
+    implementation project(':browser-engine-gecko')
+
+    implementation ComponentsDependencies.kotlin_coroutines
+    testImplementation ComponentsDependencies.testing_coroutines
+    implementation ComponentsDependencies.accompanist_drawablepainter
+
+    implementation ComponentsDependencies.thirdparty_sentry
+
+    implementation project(':compose-awesomebar')
+    implementation project(':compose-base')
+    implementation project(':compose-cfr')
+
+    implementation project(':concept-awesomebar')
+    implementation project(':concept-base')
+    implementation project(':concept-engine')
+    implementation project(':concept-menu')
+    implementation project(':concept-push')
+    implementation project(':concept-storage')
+    implementation project(':concept-sync')
+    implementation project(':concept-toolbar')
+    implementation project(':concept-tabstray')
+
+    implementation project(':browser-domains')
+    implementation project(':browser-icons')
+    implementation project(':browser-menu')
+    implementation project(':browser-menu2')
+    implementation project(':browser-session-storage')
+    implementation project(':browser-state')
+    implementation project(':browser-storage-sync')
+    implementation project(':browser-tabstray')
+    implementation project(':browser-thumbnails')
+    implementation project(':browser-toolbar')
+
+    implementation project(':feature-addons')
+    implementation project(':feature-accounts')
+    implementation project(':feature-app-links')
+    implementation project(':feature-autofill')
+    implementation project(':feature-awesomebar')
+    implementation project(':feature-contextmenu')
+    implementation project(':feature-customtabs')
+    implementation project(':feature-downloads')
+    implementation project(':feature-fxsuggest')
+    implementation project(':feature-intent')
+    implementation project(':feature-media')
+    implementation project(':feature-prompts')
+    implementation project(':feature-push')
+    implementation project(':feature-privatemode')
+    implementation project(':feature-pwa')
+    implementation project(':feature-qr')
+    implementation project(':feature-search')
+    implementation project(':feature-session')
+    implementation project(':feature-syncedtabs')
+    implementation project(':feature-toolbar')
+    implementation project(':feature-tabs')
+    implementation project(':feature-findinpage')
+    implementation project(':feature-logins')
+    implementation project(':feature-sitepermissions')
+    implementation project(':feature-readerview')
+    implementation project(':feature-tab-collections')
+    implementation project(':feature-recentlyclosed')
+    implementation project(':feature-top-sites')
+    implementation project(':feature-share')
+    implementation project(':feature-accounts-push')
+    implementation project(':feature-webauthn')
+    implementation project(':feature-webcompat')
+    implementation project(':feature-webnotifications')
+    implementation project(':feature-webcompat-reporter')
+
+    implementation project(':service-pocket')
+    implementation project(':service-mars')
+    implementation project(':service-digitalassetlinks')
+    implementation project(':service-sync-autofill')
+    implementation project(':service-sync-logins')
+    implementation project(':service-firefox-accounts')
+    implementation project(':service-glean')
+    implementation ComponentsDependencies.mozilla_glean
+    implementation project(':service-location')
+    implementation project(':service-nimbus')
+
+    implementation project(':support-webextensions')
+    implementation project(':support-base')
+    implementation project(':support-rusterrors')
+    implementation project(':support-images')
+    implementation project(':support-ktx')
+    implementation project(':support-rustlog')
+    implementation project(':support-utils')
+    implementation project(':support-locale')
+
+    implementation project(':ui-colors')
+    implementation project(':ui-icons')
+    implementation project(':lib-publicsuffixlist')
+    implementation project(':ui-widgets')
+    implementation project(':ui-tabcounter')
+
+    implementation project(':lib-crash')
+    implementation project(':lib-crash-sentry')
+    implementation project(':lib-push-firebase')
+    implementation project(':lib-state')
+    implementation project(':lib-dataprotect')
+    testImplementation project(':support-test-fakes')
+
+    debugImplementation ComponentsDependencies.leakcanary
+    debugImplementation ComponentsDependencies.androidx_compose_ui_tooling
+
+    implementation ComponentsDependencies.androidx_activity
+    implementation ComponentsDependencies.androidx_activity_ktx
+    implementation ComponentsDependencies.androidx_annotation
+    implementation ComponentsDependencies.androidx_appcompat
+    implementation ComponentsDependencies.androidx_biometric
+
+    implementation platform(ComponentsDependencies.androidx_compose_bom)
+    androidTestImplementation platform(ComponentsDependencies.androidx_compose_bom)
+    implementation ComponentsDependencies.androidx_compose_animation
+    implementation ComponentsDependencies.androidx_compose_foundation
+    implementation ComponentsDependencies.androidx_compose_material
+    implementation ComponentsDependencies.androidx_compose_ui
+    implementation ComponentsDependencies.androidx_compose_ui_tooling_preview
+
+    implementation ComponentsDependencies.androidx_constraintlayout
+    implementation ComponentsDependencies.androidx_coordinatorlayout
+    implementation ComponentsDependencies.androidx_core
+    implementation ComponentsDependencies.androidx_core_ktx
+    implementation ComponentsDependencies.androidx_core_splashscreen
+    implementation ComponentsDependencies.androidx_datastore
+    implementation ComponentsDependencies.androidx_datastore_preferences
+    implementation ComponentsDependencies.androidx_fragment
+    implementation ComponentsDependencies.androidx_lifecycle_common
+    implementation ComponentsDependencies.androidx_lifecycle_livedata
+    implementation ComponentsDependencies.androidx_lifecycle_process
+    implementation ComponentsDependencies.androidx_lifecycle_runtime
+    implementation ComponentsDependencies.androidx_lifecycle_service
+    implementation ComponentsDependencies.androidx_lifecycle_viewmodel
+    implementation ComponentsDependencies.androidx_navigation_compose
+    implementation ComponentsDependencies.androidx_navigation_fragment
+    implementation ComponentsDependencies.androidx_navigation_ui
+    implementation ComponentsDependencies.androidx_paging
+    implementation ComponentsDependencies.androidx_preferences
+    implementation ComponentsDependencies.androidx_profileinstaller
+    implementation ComponentsDependencies.androidx_recyclerview
+    implementation ComponentsDependencies.androidx_swiperefreshlayout
+    implementation ComponentsDependencies.androidx_transition
+    implementation ComponentsDependencies.androidx_viewpager2
+    implementation ComponentsDependencies.androidx_work_runtime
+
+    implementation ComponentsDependencies.protobuf_javalite
+    implementation ComponentsDependencies.google_material
+
+    implementation(libs.adjust)
+    implementation(libs.installreferrer)
+
+    // Required for the Google Advertising ID
+    implementation ComponentsDependencies.play_services_ads_id
+
+    // Required for in-app reviews
+    implementation ComponentsDependencies.play_review
+    implementation ComponentsDependencies.play_review_ktx
+
+    androidTestImplementation ComponentsDependencies.testing_fastlane
+    androidTestImplementation ComponentsDependencies.testing_falcon
+
+    androidTestImplementation(ComponentsDependencies.androidx_espresso_contrib) {
+        exclude module: 'protobuf-lite'
     }
+    androidTestImplementation ComponentsDependencies.androidx_espresso_core
+    androidTestImplementation ComponentsDependencies.androidx_espresso_idling_resource
+    androidTestImplementation ComponentsDependencies.androidx_espresso_intents
+    androidTestImplementation ComponentsDependencies.androidx_test_core
+    androidTestImplementation ComponentsDependencies.androidx_test_junit
+    androidTestImplementation ComponentsDependencies.androidx_test_monitor
+    androidTestImplementation ComponentsDependencies.androidx_test_rules
+    androidTestImplementation ComponentsDependencies.androidx_test_runner
+    androidTestImplementation ComponentsDependencies.androidx_test_uiautomator
+    androidTestUtil ComponentsDependencies.androidx_test_orchestrator
+    androidTestImplementation ComponentsDependencies.testing_leakcanary
+
+    androidTestImplementation ComponentsDependencies.androidx_benchmark_junit4
+    androidTestImplementation ComponentsDependencies.androidx_compose_ui_test
+    androidTestImplementation ComponentsDependencies.androidx_work_testing
+    androidTestImplementation ComponentsDependencies.testing_mockwebserver
+    testImplementation project(':support-test')
+    testImplementation project(':support-test-libstate')
+    testImplementation ComponentsDependencies.androidx_test_junit
+    testImplementation ComponentsDependencies.androidx_work_testing
+    testImplementation ComponentsDependencies.mozilla_appservices_full_megazord_libsForTests
+    testImplementation (ComponentsDependencies.testing_robolectric) {
+        exclude group: 'org.apache.maven'
+    }
+
+    testImplementation ComponentsDependencies.testing_maven_ant_tasks
+    implementation project(':support-rusthttp')
+
+    androidTestImplementation ComponentsDependencies.testing_mockk_android
+    testImplementation ComponentsDependencies.testing_mockk
+
+    // For the initial release of Glean 19, we require consumer applications to
+    // depend on a separate library for unit tests. This will be removed in future releases.
+    testImplementation "org.mozilla.telemetry:glean-native-forUnitTests:${project.ext.glean_version}"
+
+    lintChecks project(":mozilla-lint-rules")
+    lintChecks project(':tooling-lint')
 }
 
-apply plugin: 'maven-publish'
-
-version = getVersionNumber()
-println("GeckoView version = " + version)
-group = 'org.mozilla.geckoview'
-
-def getArtifactId() {
-    def id = "geckoview" + project.ext.artifactSuffix
-
-    if (!mozconfig.substs.MOZ_ANDROID_GECKOVIEW_LITE) {
-        id += "-omni"
+protobuf {
+    protoc {
+        artifact = ComponentsDependencies.protobuf_compiler
     }
 
-    if (mozconfig.substs.MOZILLA_OFFICIAL && !mozconfig.substs.MOZ_ANDROID_FAT_AAR_ARCHITECTURES) {
-        // In automation, per-architecture artifacts identify
-        // the architecture; multi-architecture artifacts don't.
-        // When building locally, we produce a "skinny AAR" with
-        // one target architecture masquerading as a "fat AAR"
-        // to enable Gradle composite builds to substitute this
-        // project into consumers easily.
-        id += "-${mozconfig.substs.ANDROID_CPU_ARCH}"
-    }
-
-    return id
-}
-
-publishing {
-    publications {
-        android.libraryVariants.all { variant ->
-            "${variant.name}"(MavenPublication) {
-                from components.findByName(variant.name)
-
-                pom {
-                    afterEvaluate {
-                        artifactId = getArtifactId()
-                    }
-
-                    url = 'https://geckoview.dev'
-
-                    licenses {
-                        license {
-                            name = 'The Mozilla Public License, v. 2.0'
-                            url = 'http://mozilla.org/MPL/2.0/'
-                            distribution = 'repo'
-                        }
-                    }
-
-                    scm {
-                        if (mozconfig.substs.MOZ_INCLUDE_SOURCE_INFO) {
-                            // URL is like "https://hg.mozilla.org/mozilla-central/rev/1e64b8a0c546a49459d404aaf930d5b1f621246a".
-                            connection = "scm::hg::${mozconfig.substs.MOZ_SOURCE_REPO}"
-                            url = mozconfig.substs.MOZ_SOURCE_URL
-                            tag = mozconfig.substs.MOZ_SOURCE_CHANGESET
-                        } else {
-                            // Default to mozilla-central.
-                            connection = 'scm::hg::https://hg.mozilla.org/mozilla-central/'
-                            url = 'https://hg.mozilla.org/mozilla-central/'
-                        }
-                    }
+    // Generates the java Protobuf-lite code for the Protobufs in this project. See
+    // https://github.com/google/protobuf-gradle-plugin#customizing-protobuf-compilation
+    // for more information.
+    generateProtoTasks {
+        all().each { task ->
+            task.builtins {
+                java {
+                    option 'lite'
                 }
-
-                // Javadoc and sources for developer ergononomics.
-                artifact tasks["javadocJar${variant.name.capitalize()}"]
-                artifact tasks["sourcesJar${variant.name.capitalize()}"]
             }
         }
     }
-    repositories {
-        maven {
-            url = "${topobjdir}/gradle/maven"
+}
+
+if (project.hasProperty("coverage")) {
+    tasks.withType(Test).configureEach {
+        jacoco.includeNoLocationClasses = true
+        jacoco.excludes = ['jdk.internal.*']
+    }
+
+    jacoco {
+        toolVersion = Versions.jacoco
+    }
+
+    android.applicationVariants.configureEach { variant ->
+        tasks.register("jacoco${variant.name.capitalize()}TestReport", JacocoReport) {
+            dependsOn "test${variant.name.capitalize()}UnitTest"
+
+            reports {
+                xml.required = true
+                html.required = true
+            }
+
+            def fileFilter = ['**/R.class', '**/R$*.class', '**/BuildConfig.*', '**/Manifest*.*',
+                              '**/*Test*.*', 'android/**/*.*', '**/*$[0-9].*']
+            def kotlinDebugTree = fileTree(dir: "$project.layout.buildDirectory/tmp/kotlin-classes/${variant.name}", excludes: fileFilter)
+            def javaDebugTree = fileTree(dir: "$project.layout.buildDirectory/intermediates/classes/${variant.flavorName}/${variant.buildType.name}",
+                    excludes: fileFilter)
+            def mainSrc = "$project.projectDir/src/main/java"
+
+            sourceDirectories.setFrom(files([mainSrc]))
+            classDirectories.setFrom(files([kotlinDebugTree, javaDebugTree]))
+            executionData.setFrom(fileTree(dir: project.layout.buildDirectory, includes: [
+                "jacoco/test${variant.name.capitalize()}UnitTest.exec",
+                'outputs/code-coverage/connected/*coverage.ec'
+            ]))
         }
+    }
+
+    android {
+        buildTypes {
+            debug {
+                testCoverageEnabled true
+            }
+        }
+    }
+}
+
+// -------------------------------------------------------------------------------------------------
+// Task for printing APK information for the requested variant
+// Usage: "./gradlew printVariants
+// -------------------------------------------------------------------------------------------------
+tasks.register('printVariants') {
+    doLast {
+        def variants = android.applicationVariants.collect { variant -> [
+            apks: variant.outputs.collect { output -> [
+                abi: output.getFilter(FilterConfiguration.FilterType.ABI.name()),
+                fileName: output.outputFile.name
+            ]},
+            build_type: variant.buildType.name,
+            name: variant.name,
+        ]}
+        // AndroidTest is a special case not included above
+        variants.add([
+            apks: [[
+                abi: 'noarch',
+                fileName: 'app-debug-androidTest.apk',
+            ]],
+            build_type: 'androidTest',
+            name: 'androidTest',
+        ])
+        println 'variants: ' + JsonOutput.toJson(variants)
     }
 }
 
 afterEvaluate {
-    // The bundle tasks are only present when the particular configuration is
-    // being built, so this task might not exist.  (This is due to the way the
-    // Android Gradle plugin defines things during configuration.)
-    //by sutiao 
-    /*def bundle = tasks.findByName('bundleReleaseAar')
-    if (!bundle) {
-        return
-    }*/
-    
-    // Remove default configuration, which is the release configuration, when
-    // building.  This makes `gradle install` install the deubg artifacts, not
-    // the release artifacts (which are not suitable for distribution.)
-    def Configuration archivesConfig = project.getConfigurations().getByName('archives')
-    archivesConfig.artifacts.removeAll { it.extension.equals('aar') }
 
-    // For now, ensure Kotlin is only used in tests.
-    android.sourceSets.all { sourceSet ->
-        if (sourceSet.name.startsWith('test') || sourceSet.name.startsWith('androidTest')) {
-            return
-        }
-        (sourceSet.java.srcDirs + sourceSet.kotlin.srcDirs).each {
-            if (!fileTree(it, { include '**/*.kt' }).empty) {
-                throw new GradleException("Kotlin used in non-test directory ${it.path}")
+    // Format test output. Ported from AC #2401
+    tasks.withType(Test).configureEach {
+        systemProperty "robolectric.logging", "stdout"
+        systemProperty "logging.test-mode", "true"
+
+        testLogging.events = []
+
+        def out = services.get(StyledTextOutputFactory).create("tests")
+
+        beforeSuite { descriptor ->
+            if (descriptor.getClassName() != null) {
+                out.style(Style.Header).println("\nSUITE: " + descriptor.getClassName())
             }
         }
-    }
-    //by sutiao
-    def sourceJar   = tasks.findByName("sourceReleaseJar")
-    def javadocJar  = tasks.findByName("javadocReleaseJar") ?: tasks.findByName("javadocJar")
 
-    // 先配置好 task，避免重复文件冲突
-    if (sourceJar) {
-        sourceJar.duplicatesStrategy = DuplicatesStrategy.EXCLUDE
-    }
-    if (javadocJar) {
-        javadocJar.duplicatesStrategy = DuplicatesStrategy.EXCLUDE
-    }
+        beforeTest { descriptor ->
+            out.style(Style.Description).println("  TEST: " + descriptor.getName())
+        }
 
-    publishing {
-        publications {
-            release(MavenPublication) {
-                // 移除所有默认的 sources/javadoc artifact
-                artifacts.removeAll { it.extension == 'jar' && it.classifier in ['sources','javadoc'] }
+        onOutput { descriptor, event ->
+            logger.lifecycle("    " + event.message.trim())
+        }
 
-                // 重新添加干净的 sources JAR
-                if (sourceJar) {
-                    artifact(sourceJar) {
-                        classifier = 'sources'
-                    }
-                }
+        afterTest { descriptor, result ->
+            switch (result.getResultType()) {
+                case ResultType.SUCCESS:
+                    out.style(Style.Success).println("  SUCCESS")
+                    break
 
-                // 重新添加干净的 javadoc JAR
-                if (javadocJar) {
-                    artifact(javadocJar) {
-                        classifier = 'javadoc'
-                    }
-                }
+                case ResultType.FAILURE:
+                    def testId = descriptor.getClassName() + "." + descriptor.getName()
+                    out.style(Style.Failure).println("  TEST-UNEXPECTED-FAIL | " + testId + " | " + result.getException())
+                    break
+
+                case ResultType.SKIPPED:
+                    out.style(Style.Info).println("  SKIPPED")
+                    break
             }
+            logger.lifecycle("")
         }
     }
-    // ✅ 真正关闭 .module metadata 的关键代码
-    tasks.withType(GenerateModuleMetadata).configureEach {
-        enabled = false
-    }
-    //by sutiao
-    
 }
 
-// Bug 1353055 - Strip 'vars' debugging information to agree with moz.build.
-apply from: "${topsrcdir}/mobile/android/gradle/debug_level.gradle"
-android.libraryVariants.all configureVariantDebugLevel
+if (gradle.hasProperty('localProperties.dependencySubstitutions.geckoviewTopsrcdir')) {
+    if (gradle.hasProperty('localProperties.dependencySubstitutions.geckoviewTopobjdir')) {
+        ext.topobjdir = gradle."localProperties.dependencySubstitutions.geckoviewTopobjdir"
+    }
+    ext.topsrcdir = gradle."localProperties.dependencySubstitutions.geckoviewTopsrcdir"
+    apply from: "${topsrcdir}/substitute-local-geckoview.gradle"
+}
 
-// There's nothing specific to the :geckoview project here -- this just needs to
-// be somewhere where the Android plugin is available so that we can fish the
-// path to "android.jar".
-task("generateSDKBindings", type: JavaExec) {
-    classpath project(':annotations').jar.archiveFile
-    classpath project(':annotations').compileJava.classpath
-    classpath project(':annotations').sourceSets.main.runtimeClasspath
+android.applicationVariants.configureEach { variant ->
+    tasks.register("apkSize${variant.name.capitalize()}", ApkSizeTask) {
+        variantName = variant.name
+        apks = variant.outputs.collect { output -> output.outputFile.name }
+        dependsOn "package${variant.name.capitalize()}"
+    }
+}
 
-    // To use the lint APIs: "Lint must be invoked with the System property
-    // com.android.tools.lint.bindir pointing to the ANDROID_SDK tools
-    // directory"
-    systemProperties = [
-        'com.android.tools.lint.bindir': "${android.sdkDirectory}/tools",
-    ]
+def getSupportedLocales() {
+    // This isn't running as a task, instead the array is build when the gradle file is parsed.
+    // https://github.com/mozilla-mobile/fenix/issues/14175
+    def foundLocales = new StringBuilder()
+    foundLocales.append("new String[]{")
 
-    mainClass = 'org.mozilla.gecko.annotationProcessors.SDKProcessor'
-
-    // Configure the arguments at evaluation-time, not at configuration-time.
-    doFirst {
-        // We only want to generate bindings for the main framework JAR,
-        // but not any of the additional android.test libraries.
-        args android.bootClasspath.findAll { it.getName().startsWith('android.jar') }
-        args 29
-        args "${topobjdir}/widget/android/bindings"
-
-        // From -Pgenerate_sdk_bindings_args=... on command line; missing in
-        // `android-gradle-dependencies` toolchain task.
-        if (project.hasProperty('generate_sdk_bindings_args')) {
-            args project.generate_sdk_bindings_args.split(';')
+    fileTree("src/main/res").visit { FileVisitDetails details ->
+        if (details.file.path.endsWith("${File.separator}strings.xml")) {
+            def languageCode = details.file.parent.tokenize(File.separator).last().replaceAll('values-', '').replaceAll('-r', '-')
+            languageCode = (languageCode == "values") ? "en-US" : languageCode
+            foundLocales.append("\"").append(languageCode).append("\"").append(",")
         }
     }
 
-    workingDir "${topsrcdir}/widget/android/bindings"
-
-    dependsOn project(':annotations').jar
-}
-
-preBuild.dependsOn(":verifyGleanVersion")
-
-apply plugin: 'org.mozilla.apilint'
-
-apiLint {
-    // TODO: Change this to `org` after hiding org.mozilla.gecko
-    packageFilter = 'org.mozilla.geckoview'
-    changelogFileName = 'src/main/java/org/mozilla/geckoview/doc-files/CHANGELOG.md'
-    // Put those files in ${buildDir}/intermediates/javac/<variant>
-    // instead of ${buildDir}/intermediates/javac/<variant>/compile<Variant>JavaWithJavac/classes
-    jsonResultFileName = '../../apilint-result.json'
-    apiOutputFileName = '../../api.txt'
-    skipClassesRegex = [
-        '^org.mozilla.geckoview.BuildConfig$',
-        '^org.mozilla.geckoview.R$',
-    ]
-    lintFilters = ['GV']
-    deprecationAnnotation = 'org.mozilla.geckoview.DeprecationSchedule'
-    libraryVersion = mozconfig.substs.MOZILLA_VERSION.split('\\.')[0] as Integer
-    allowedPackages = [
-        'java',
-        'android',
-        'androidx',
-        'org.json',
-        'org.mozilla.geckoview',
-    ]
+    foundLocales.append("}")
+    def foundLocalesString = foundLocales.toString().replaceAll(',}', '}')
+    return foundLocalesString
 }
