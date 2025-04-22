@@ -166,7 +166,7 @@ android {
         aidl = true
     }
 
-    /*publishing {
+    publishing {
         // by sutiao
         //singleVariant('debug')
         singleVariant('defaultFlavorRelease') {
@@ -174,23 +174,7 @@ android {
             withJavadocJar()  // 可选：包含文档
             withArtifacts()
         }
-        publications {
-            release(MavenPublication) {
-                afterEvaluate {
-                    from components.defaultFlavorRelease
-                }
-            }
-        }
         // by sutiao
-    }*/
-    afterEvaluate {
-        publishing {
-            publications {
-                release(MavenPublication) {
-                    from components.defaultFlavorRelease
-                }
-            }
-        }
     }
 
     namespace 'org.mozilla.geckoview'
